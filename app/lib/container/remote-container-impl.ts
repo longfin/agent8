@@ -19,6 +19,7 @@ import type {
 } from './interfaces';
 import type { ITerminal } from '~/types/terminal';
 import { withResolvers } from '~/utils/promises';
+import { io, Socket } from 'socket.io-client';
 
 type BufferEncoding =
   | 'ascii'
@@ -119,10 +120,10 @@ type EventListenerMap = {
 };
 
 /**
- * Class to manage remote WebSocket connection and communication
+ * Class to manage remote Socket.IO connection and communication
  */
 class RemoteContainerConnection {
-  private _ws: WebSocket | null = null;
+  private _socket: Socket | null = null;
   private _requestMap = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void }>();
   private _connected = false;
   private _connectionPromise: Promise<void> | null = null;
@@ -132,6 +133,7 @@ class RemoteContainerConnection {
     'preview-message': new Set(),
     error: new Set(),
   };
+  private _subscriptions = new Set<string>();
 
   constructor(
     private _serverUrl: string,
@@ -152,12 +154,12 @@ class RemoteContainerConnection {
     this._connectionPromise = promise;
 
     try {
-      this._ws = new WebSocket(this._serverUrl);
+      this._socket = io(this._serverUrl, { reconnection: true });
 
-      this._ws.onopen = () => {
+      this._socket.on('connect', () => {
         this._connected = true;
+        console.log('Socket.IO connected');
 
-        // Send authentication token if available
         if (this._token) {
           this.sendRequest({
             id: 'auth-' + Date.now(),
@@ -168,29 +170,56 @@ class RemoteContainerConnection {
           });
         }
 
-        resolve();
-      };
-
-      this._ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          this._handleMessage(data);
-        } catch (err) {
-          console.error('Remote container message parsing error:', err);
+        // Restore subscriptions after reconnection
+        if (this._subscriptions.size > 0) {
+          this._socket?.emit('subscribe', Array.from(this._subscriptions));
         }
-      };
 
-      this._ws.onerror = (error) => {
-        const err = new Error(`WebSocket connection error: ${error}`);
-        this._notifyError(err);
-        reject(err);
-      };
+        resolve();
+      });
 
-      this._ws.onclose = () => {
+      this._socket.on('disconnect', () => {
         this._connected = false;
         this._connectionPromise = null;
-        console.warn('Remote container connection closed');
-      };
+        console.warn('Socket.IO connection closed');
+      });
+
+      this._socket.on('connect_error', (error) => {
+        const err = new Error(`Socket.IO connection error: ${error.message}`);
+        this._notifyError(err);
+        reject(err);
+      });
+
+      // Unified message handling
+      this._socket.on('message', (message: any) => {
+        if (message.id && this._requestMap.has(message.id)) {
+          const { resolve, reject } = this._requestMap.get(message.id)!;
+          this._requestMap.delete(message.id);
+
+          if (message.success) {
+            resolve(message);
+          } else {
+            reject(new Error(message.error?.message || 'Error processing request'));
+          }
+        }
+      });
+
+      // Event handling
+      this._socket.on('port', (data) => {
+        this._listeners.port.forEach((listener) => listener(data.port, data.type, data.url));
+      });
+
+      this._socket.on('server-ready', (data) => {
+        this._listeners['server-ready'].forEach((listener) => listener(data.port, data.url));
+      });
+
+      this._socket.on('preview-message', (data) => {
+        this._listeners['preview-message'].forEach((listener) => listener(data));
+      });
+
+      this._socket.on('error', (data) => {
+        this._notifyError(new Error(data?.message || 'Unknown error'));
+      });
 
       await promise;
     } catch (error) {
@@ -203,47 +232,14 @@ class RemoteContainerConnection {
     await this.connect();
 
     return new Promise((resolve, reject) => {
-      if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
-        reject(new Error('WebSocket connection is not open'));
+      if (!this._socket || !this._socket.connected) {
+        reject(new Error('Socket.IO connection is not open'));
         return;
       }
 
       this._requestMap.set(request.id, { resolve, reject });
-      this._ws.send(JSON.stringify(request));
+      this._socket.emit('message', request);
     });
-  }
-
-  private _handleMessage(message: any) {
-    // Handle server events
-    if (message.event) {
-      switch (message.event) {
-        case 'port':
-          this._listeners.port.forEach((listener) => listener(message.data.port, message.data.type, message.data.url));
-          break;
-        case 'server-ready':
-          this._listeners['server-ready'].forEach((listener) => listener(message.data.port, message.data.url));
-          break;
-        case 'preview-message':
-          this._listeners['preview-message'].forEach((listener) => listener(message.data));
-          break;
-        case 'error':
-          this._notifyError(new Error(message.data?.message || 'Unknown error'));
-          break;
-      }
-      return;
-    }
-
-    // Handle request/response
-    if (message.id && this._requestMap.has(message.id)) {
-      const { resolve, reject } = this._requestMap.get(message.id)!;
-      this._requestMap.delete(message.id);
-
-      if (message.success) {
-        resolve(message);
-      } else {
-        reject(new Error(message.error?.message || 'Error processing request'));
-      }
-    }
   }
 
   on<E extends keyof EventListenerMap>(event: E, listener: EventListenerMap[E]): Unsubscribe {
@@ -262,10 +258,26 @@ class RemoteContainerConnection {
     this._listeners.error.forEach((listener) => listener(error));
   }
 
+  subscribe(topic: string): void {
+    this._subscriptions.add(topic);
+
+    if (this._socket?.connected) {
+      this._socket.emit('subscribe', [topic]);
+    }
+  }
+
+  unsubscribe(topic: string): void {
+    this._subscriptions.delete(topic);
+
+    if (this._socket?.connected) {
+      this._socket.emit('unsubscribe', topic);
+    }
+  }
+
   close() {
-    if (this._ws) {
-      this._ws.close();
-      this._ws = null;
+    if (this._socket) {
+      this._socket.disconnect();
+      this._socket = null;
       this._connected = false;
       this._connectionPromise = null;
     }
@@ -477,8 +489,11 @@ export class RemoteContainer implements Container {
     }
 
     const pid = response.data.pid;
+    const processId = `process-${pid}`;
 
-    // ContainerProcess interface implementation for remote process
+    // Subscribe to process output
+    this._connection.subscribe(processId);
+
     const input = {
       getWriter: () => {
         return new WritableStreamDefaultWriter<string>({
@@ -498,16 +513,23 @@ export class RemoteContainer implements Container {
       },
     };
 
-    // Create output stream
-    const { promise: exit } = withResolvers<number>();
+    const { promise: exit, resolve: resolveExit } = withResolvers<number>();
 
-    // ReadableStream implementation
     const output = new ReadableStream<string>({
-      start(_controller) {
-        /*
-         * Output data from the server is received via WebSocket messages
-         * In a real implementation, add output stream processing logic here
-         */
+      start: (controller) => {
+        const socket = (this._connection as any)._socket;
+
+        if (socket) {
+          socket.on(processId, (data: any) => {
+            if (data.type === 'output') {
+              controller.enqueue(data.content);
+            } else if (data.type === 'exit') {
+              controller.close();
+              resolveExit(data.code);
+              this._connection.unsubscribe(processId);
+            }
+          });
+        }
       },
     });
 

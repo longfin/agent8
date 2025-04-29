@@ -1,16 +1,13 @@
-import { WebSocket } from 'ws';
 import { vi, describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import { RemoteContainerFactory, RemoteContainerFileSystem } from '~/lib/container/remote-container-impl';
 import type { FileSystemTree, Container } from '~/lib/container/interfaces';
 import type { ITerminal } from '~/types/terminal';
 
-global.WebSocket = WebSocket as any;
-
 /**
  * 실제 서버 연결을 위한 설정
  * 테스트 실행 시 실제 서버에 연결합니다.
  */
-const TEST_SERVER_URL = 'ws://localhost:53000'; // 테스트용 서버 URL 설정
+const TEST_SERVER_URL = 'http://localhost:53000/'; // 테스트용 서버 URL 설정
 
 /**
  * 실제 터미널 연결을 위한 터미널 목업
