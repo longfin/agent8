@@ -1,11 +1,11 @@
 import type { Container, ContainerOptions } from './interfaces';
-import { RemoteContainerFactory } from './remote-container-impl';
+import { RemoteContainer, RemoteContainerFactory } from './remote-container-impl';
 import { WebContainerFactory } from './webcontainer-impl';
 
 /**
  * Available container types
  */
-export type ContainerType = 'webcontainer' | 'remotecontainer';
+export type ContainerType = 'webcontainer' | 'remotecontainer' | 'remotecontainer-dev';
 
 /**
  * Container factory class
@@ -28,6 +28,12 @@ export class ContainerFactory {
         return this._webContainerFactory.boot(options);
       case 'remotecontainer':
         return this._remoteContainerFactory.boot(options);
+      case 'remotecontainer-dev':
+        return new RemoteContainer(
+          import.meta.env.VITE_REMOTE_CONTAINER_DEV_URL,
+          `/home/${options.workdirName}`,
+          options.v8AccessToken || '',
+        );
       default:
         throw new Error(`Unknown container type: ${type}`);
     }
