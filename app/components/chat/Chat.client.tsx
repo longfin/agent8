@@ -157,6 +157,12 @@ export function Chat() {
       if (Object.keys(files).length > 0) {
         workbenchStore.container.then(async (containerInstance) => {
           try {
+            await containerInstance.fs.rm('/src', { recursive: true, force: true });
+          } catch (error) {
+            logger.error('Error removing work directory:', error);
+          }
+
+          try {
             const previews = workbenchStore.previews.get();
             const currentPreview = previews.find((p) => p.ready);
 
